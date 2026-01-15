@@ -1,0 +1,17 @@
+//
+//  APEGWVApp.swift
+//  APEGWV
+//
+//  Created by Edgar A. Barragán G. on 15/01/26.
+//
+
+import SwiftUI
+
+@main
+struct APEGWVApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
