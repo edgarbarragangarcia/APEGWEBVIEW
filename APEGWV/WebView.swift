@@ -2,7 +2,7 @@
 //  WebView.swift
 //  APEGWV
 //
-//  Created by Antigravity on 15/01/26.
+//  Created by Edgar A. Barragán G. on 15/01/26.
 //
 
 import SwiftUI
@@ -26,6 +26,9 @@ struct WebView: UIViewRepresentable {
         // Setup User Content Controller for Bridge
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "permissionHandler")
+        controller.add(context.coordinator, name: "notificationHandler")
+        controller.add(context.coordinator, name: "sensorHandler")
+        controller.add(context.coordinator, name: "cardScannerHandler")
         
         let initialStatuses = permissionManager.getStatusesJSON()
         
@@ -39,6 +42,30 @@ struct WebView: UIViewRepresentable {
                 },
                 request: function(type) {
                     window.webkit.messageHandlers.permissionHandler.postMessage({command: 'request', type: type});
+                }
+            };
+            
+            window.iOSNotifications = {
+                request: function() {
+                    window.webkit.messageHandlers.notificationHandler.postMessage({command: 'request'});
+                },
+                getStatus: function() {
+                    window.webkit.messageHandlers.notificationHandler.postMessage({command: 'getStatus'});
+                }
+            };
+            
+            window.iOSSensors = {
+                start: function(interval) {
+                    window.webkit.messageHandlers.sensorHandler.postMessage({command: 'start', interval: interval || 0.1});
+                },
+                stop: function() {
+                    window.webkit.messageHandlers.sensorHandler.postMessage({command: 'stop'});
+                }
+            };
+            
+            window.iOSCardScanner = {
+                scan: function() {
+                    window.webkit.messageHandlers.cardScannerHandler.postMessage({command: 'scan'});
                 }
             };
             
@@ -60,16 +87,6 @@ struct WebView: UIViewRepresentable {
             window.onPermissionUpdate = function(statuses) {
                 window.iOSPermissionStatuses = statuses;
                 window.dispatchEvent(new CustomEvent('iosPermissionsUpdated', { detail: statuses }));
-                
-                // HACK: Try to force UI update if the web app uses common patterns
-                if (statuses.camera === 'authorized') {
-                    // Try to find elements with "PENDIENTE" related to camera and change them
-                    document.querySelectorAll('*').forEach(el => {
-                        if (el.innerText === 'PENDIENTE' && el.closest('.camera-card')) {
-                             // This is specific, but informative
-                        }
-                    });
-                }
             };
             
             // Auto-refresh fallback
@@ -84,12 +101,21 @@ struct WebView: UIViewRepresentable {
         
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.uiDelegate = context.coordinator
+        webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
         
         // Start GPS if authorized
         if permissionManager.locationStatus == CLAuthorizationStatus.authorizedWhenInUse || permissionManager.locationStatus == CLAuthorizationStatus.authorizedAlways {
             permissionManager.requestLocationPermission() // This starts updates
         }
+        
+        // Listen for notification taps
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.handleNotificationTap(_:)),
+            name: NSNotification.Name("NotificationTapped"),
+            object: nil
+        )
         
         return webView
     }
@@ -99,7 +125,7 @@ struct WebView: UIViewRepresentable {
         uiView.load(request)
     }
     
-    class Coordinator: NSObject, WKUIDelegate, WKScriptMessageHandler {
+    class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
         var parent: WebView
         weak var webView: WKWebView?
         
@@ -109,6 +135,16 @@ struct WebView: UIViewRepresentable {
             self.parent.permissionManager.onStatusChange = { [weak self] in
                 self?.sendStatusesToWeb()
             }
+            
+            // Sensor updates
+            SensorManager.shared.onSensorUpdate = { [weak self] data in
+                self?.sendSensorData(data)
+            }
+            
+            // Notification token
+            NotificationManager.shared.onTokenReceived = { [weak self] token in
+                self?.sendNotificationToken(token)
+            }
         }
         
         // Handle messages from JavaScript
@@ -116,6 +152,22 @@ struct WebView: UIViewRepresentable {
             guard let dict = message.body as? [String: Any],
                   let command = dict["command"] as? String else { return }
             
+            switch message.name {
+            case "permissionHandler":
+                handlePermissionMessage(command: command, dict: dict)
+            case "notificationHandler":
+                handleNotificationMessage(command: command)
+            case "sensorHandler":
+                handleSensorMessage(command: command, dict: dict)
+            case "cardScannerHandler":
+                handleCardScannerMessage(command: command)
+            default:
+                break
+            }
+        }
+        
+        // MARK: - Permission Messages
+        private func handlePermissionMessage(command: String, dict: [String: Any]) {
             switch command {
             case "getStatuses":
                 sendStatusesToWeb()
@@ -136,7 +188,6 @@ struct WebView: UIViewRepresentable {
                 }
             case "location":
                 parent.permissionManager.requestLocationPermission()
-                // Location update is async via delegate
             case "motion":
                 parent.permissionManager.requestMotionPermission()
             default:
@@ -144,12 +195,86 @@ struct WebView: UIViewRepresentable {
             }
         }
         
+        // MARK: - Notification Messages
+        private func handleNotificationMessage(command: String) {
+            switch command {
+            case "request":
+                NotificationManager.shared.requestAuthorization { granted in
+                    self.sendStatusesToWeb()
+                }
+            case "getStatus":
+                let json = NotificationManager.shared.getStatusJSON()
+                let js = "if (window.onNotificationStatusUpdate) { window.onNotificationStatusUpdate(\(json)); }"
+                webView?.evaluateJavaScript(js, completionHandler: nil)
+            default:
+                break
+            }
+        }
+        
+        // MARK: - Sensor Messages
+        private func handleSensorMessage(command: String, dict: [String: Any]) {
+            switch command {
+            case "start":
+                let interval = dict["interval"] as? Double ?? 0.1
+                SensorManager.shared.startSensors(updateInterval: interval)
+            case "stop":
+                SensorManager.shared.stopSensors()
+            default:
+                break
+            }
+        }
+        
+        // MARK: - Card Scanner
+        private func handleCardScannerMessage(command: String) {
+            guard command == "scan" else { return }
+            DispatchQueue.main.async {
+                guard let topVC = UIApplication.shared.topMostViewController() else { return }
+                let scanner = CardScannerViewController()
+                scanner.modalPresentationStyle = .fullScreen
+                scanner.onCardScanned = { [weak self] number, expiry, name in
+                    let result: [String: Any] = [
+                        "number": number,
+                        "expiry": expiry ?? "",
+                        "name": name ?? ""
+                    ]
+                    if let jsonData = try? JSONSerialization.data(withJSONObject: result, options: []),
+                       let jsonString = String(data: jsonData, encoding: .utf8) {
+                        let js = "if (window.onCardScanned) { window.onCardScanned(\(jsonString)); }"
+                        self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+                    }
+                }
+                topVC.present(scanner, animated: true)
+            }
+        }
+        
+        // MARK: - Send Data to Web
         func sendStatusesToWeb() {
             let json = parent.permissionManager.getStatusesJSON()
             let js = "if (window.onPermissionUpdate) { window.onPermissionUpdate(\(json)); }"
             webView?.evaluateJavaScript(js, completionHandler: nil)
         }
         
+        private func sendSensorData(_ data: [String: Any]) {
+            if let jsonData = try? JSONSerialization.data(withJSONObject: data, options: []),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                let js = "if (window.onSensorUpdate) { window.onSensorUpdate(\(jsonString)); }"
+                webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+        
+        private func sendNotificationToken(_ token: String) {
+            let js = "if (window.onDeviceTokenReceived) { window.onDeviceTokenReceived('\(token)'); }"
+            webView?.evaluateJavaScript(js, completionHandler: nil)
+        }
+        
+        @objc func handleNotificationTap(_ notification: Notification) {
+            if let data = notification.userInfo?["data"] as? String {
+                let js = "if (window.onNotificationTapped) { window.onNotificationTapped(\(data)); }"
+                webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+        
+        // MARK: - WKUIDelegate (Camera/Media Permissions)
         @available(iOS 15.0, *)
         func webView(_ webView: WKWebView, decideMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
             let cameraAuth = AVCaptureDevice.authorizationStatus(for: .video)
@@ -166,26 +291,17 @@ struct WebView: UIViewRepresentable {
             }
         }
         
-        @available(iOS 15.0, *)
-        func webView(_ webView: WKWebView, decidePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-            // Some environments use the same method for everything, but let's be safe.
-            decisionHandler(.prompt)
-        }
-        
-        // This is the correct one for newer systems, but if WKPermissionType is not found,
-        // we might have to use a more generic approach or ignore it if not needed for this build.
-        /*
-        @available(iOS 15.0, *)
-        func webView(_ webView: WKWebView, decidePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKPermissionType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-            if type == .geolocation {
-                let status = parent.permissionManager.locationStatus
-                if status == .authorizedWhenInUse || status == .authorizedAlways {
-                    decisionHandler(.grant)
+        // MARK: - WKNavigationDelegate (Handle external links)
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if let url = navigationAction.request.url {
+                // Open external links in Safari
+                if url.scheme == "tel" || url.scheme == "mailto" {
+                    UIApplication.shared.open(url)
+                    decisionHandler(.cancel)
                     return
                 }
             }
-            decisionHandler(.prompt)
+            decisionHandler(.allow)
         }
-        */
     }
 }
