@@ -51,6 +51,19 @@ struct WebView: UIViewRepresentable {
                 },
                 getStatus: function() {
                     window.webkit.messageHandlers.notificationHandler.postMessage({command: 'getStatus'});
+                },
+                schedule: function(options) {
+                    var opts = options || {};
+                    window.webkit.messageHandlers.notificationHandler.postMessage({
+                        command: 'schedule',
+                        title: opts.title || '',
+                        body: opts.body || '',
+                        delay: opts.delay || 1,
+                        data: opts.data || {}
+                    });
+                },
+                clearBadge: function() {
+                    window.webkit.messageHandlers.notificationHandler.postMessage({command: 'clearBadge'});
                 }
             };
             
@@ -156,7 +169,7 @@ struct WebView: UIViewRepresentable {
             case "permissionHandler":
                 handlePermissionMessage(command: command, dict: dict)
             case "notificationHandler":
-                handleNotificationMessage(command: command)
+                handleNotificationMessage(command: command, dict: dict)
             case "sensorHandler":
                 handleSensorMessage(command: command, dict: dict)
             case "cardScannerHandler":
@@ -196,7 +209,7 @@ struct WebView: UIViewRepresentable {
         }
         
         // MARK: - Notification Messages
-        private func handleNotificationMessage(command: String) {
+        private func handleNotificationMessage(command: String, dict: [String: Any]) {
             switch command {
             case "request":
                 NotificationManager.shared.requestAuthorization { granted in
@@ -206,6 +219,19 @@ struct WebView: UIViewRepresentable {
                 let json = NotificationManager.shared.getStatusJSON()
                 let js = "if (window.onNotificationStatusUpdate) { window.onNotificationStatusUpdate(\(json)); }"
                 webView?.evaluateJavaScript(js, completionHandler: nil)
+            case "schedule":
+                let title = dict["title"] as? String ?? ""
+                let body = dict["body"] as? String ?? ""
+                let delay = dict["delay"] as? Double ?? 1.0
+                let data = dict["data"] as? [String: Any]
+                NotificationManager.shared.scheduleLocalNotification(
+                    title: title,
+                    body: body,
+                    delaySeconds: delay,
+                    data: data
+                )
+            case "clearBadge":
+                NotificationManager.shared.clearBadge()
             default:
                 break
             }
