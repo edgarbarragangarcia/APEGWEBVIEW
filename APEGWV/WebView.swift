@@ -81,6 +81,49 @@ struct WebView: UIViewRepresentable {
                     window.webkit.messageHandlers.cardScannerHandler.postMessage({command: 'scan'});
                 }
             };
+
+            // Unified native API expected by React web app
+            window.iOSNative = {
+                requestNotifications: function() {
+                    return new Promise((resolve) => {
+                        const handler = function(e) {
+                            window.removeEventListener('iosPermissionsUpdated', handler);
+                            resolve(e.detail);
+                        };
+                        window.addEventListener('iosPermissionsUpdated', handler);
+                        window.webkit.messageHandlers.notificationHandler.postMessage({command: 'request'});
+                    });
+                },
+                getDeviceToken: function() {
+                    return window.iOSPermissionStatuses?.deviceToken || null;
+                },
+                openExternalURL: function(url) {
+                    window.webkit.messageHandlers.permissionHandler.postMessage({
+                        command: 'openExternalURL',
+                        url: url
+                    });
+                },
+                getStatuses: function() {
+                    window.iOSPermissions.getStatuses();
+                },
+                requestPermission: function(type) {
+                    window.iOSPermissions.request(type);
+                },
+                startSensors: function(interval) {
+                    window.iOSSensors.start(interval);
+                },
+                stopSensors: function() {
+                    window.iOSSensors.stop();
+                },
+                startOCR: function() {
+                    return new Promise((resolve) => {
+                        window.onCardScanned = function(data) {
+                            resolve(data);
+                        };
+                        window.webkit.messageHandlers.cardScannerHandler.postMessage({command: 'scan'});
+                    });
+                }
+            };
             
             // Polyfill navigator.permissions.query
             if (navigator.permissions && navigator.permissions.query) {
@@ -187,6 +230,17 @@ struct WebView: UIViewRepresentable {
             case "request":
                 if let type = dict["type"] as? String {
                     handleRequest(type: type)
+                }
+            case "openExternalURL":
+                if let urlString = dict["url"] as? String,
+                   let url = URL(string: urlString) {
+                    DispatchQueue.main.async {
+                        if url.scheme == "mailto" {
+                            self.handleEmailURL(url)
+                        } else {
+                            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                        }
+                    }
                 }
             default:
                 break
@@ -317,12 +371,77 @@ struct WebView: UIViewRepresentable {
             }
         }
         
+        private func handleEmailURL(_ url: URL) {
+            let toEmail = url.path
+            var subject = ""
+            var body = ""
+            var cc = ""
+            var bcc = ""
+            
+            if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+               let queryItems = components.queryItems {
+                for item in queryItems {
+                    switch item.name.lowercased() {
+                    case "subject":
+                        subject = item.value ?? ""
+                    case "body":
+                        body = item.value ?? ""
+                    case "cc":
+                        cc = item.value ?? ""
+                    case "bcc":
+                        bcc = item.value ?? ""
+                    default:
+                        break
+                    }
+                }
+            }
+            
+            var gmailComponents = URLComponents()
+            gmailComponents.scheme = "googlegmail"
+            gmailComponents.host = ""
+            gmailComponents.path = "/co"
+            
+            var queryItems = [URLQueryItem]()
+            if !toEmail.isEmpty {
+                queryItems.append(URLQueryItem(name: "to", value: toEmail))
+            }
+            if !subject.isEmpty {
+                queryItems.append(URLQueryItem(name: "subject", value: subject))
+            }
+            if !body.isEmpty {
+                queryItems.append(URLQueryItem(name: "body", value: body))
+            }
+            if !cc.isEmpty {
+                queryItems.append(URLQueryItem(name: "cc", value: cc))
+            }
+            if !bcc.isEmpty {
+                queryItems.append(URLQueryItem(name: "bcc", value: bcc))
+            }
+            
+            gmailComponents.queryItems = queryItems
+            
+            if let gmailURL = gmailComponents.url {
+                UIApplication.shared.open(gmailURL, options: [:]) { success in
+                    if !success {
+                        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                    }
+                }
+            } else {
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            }
+        }
+        
         // MARK: - WKNavigationDelegate (Handle external links)
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if let url = navigationAction.request.url {
-                // Open external links in Safari
-                if url.scheme == "tel" || url.scheme == "mailto" {
-                    UIApplication.shared.open(url)
+                if url.scheme == "tel" {
+                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
+                    decisionHandler(.cancel)
+                    return
+                } else if url.scheme == "mailto" {
+                    DispatchQueue.main.async {
+                        self.handleEmailURL(url)
+                    }
                     decisionHandler(.cancel)
                     return
                 }
